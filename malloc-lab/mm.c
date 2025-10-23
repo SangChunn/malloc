@@ -18,6 +18,14 @@
 #include "mm.h"
 #include "memlib.h"
 
+#define WSIZE 8
+#define DSIZE 16
+#define CHUNKSIZE (1<< 12)
+#define ALIGNMENT 16
+
+#define PACK(size, alloc) ((size) | (alloc))
+#define GET(p)       (*(size_t *)(p))
+#define PUT(p, val)  (*(size_t *)(p) = (val))
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
  * provide your team information in the following struct.
@@ -45,8 +53,18 @@ team_t team = {
 /*
  * mm_init - initialize the malloc package.
  */
+static char *heap_listp;
+
 int mm_init(void)
 {
+    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1)
+        return -1;
+    PUT(heap_listp, 0);
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1));
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
+    heap_listp += (2 * WSIZE);
+
     return 0;
 }
 
