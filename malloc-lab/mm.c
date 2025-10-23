@@ -21,11 +21,19 @@
 #define WSIZE 8
 #define DSIZE 16
 #define CHUNKSIZE (1<< 12)
-#define ALIGNMENT 16
 
 #define PACK(size, alloc) ((size) | (alloc))
 #define GET(p)       (*(size_t *)(p))
 #define PUT(p, val)  (*(size_t *)(p) = (val))
+
+#define GET_SIZE(p) (GET(p) & ~0xF)
+#define GET_ALLOC(p) (GET(P) & 0x1)
+
+#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
  * provide your team information in the following struct.
@@ -43,10 +51,10 @@ team_t team = {
     ""};
 
 /* single word (4) or double word (8) alignment */
-#define ALIGNMENT 8
+#define ALIGNMENT 16
 
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
+#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0xF)
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
@@ -65,9 +73,28 @@ int mm_init(void)
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
     heap_listp += (2 * WSIZE);
 
+    if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
+        return -1;
+
     return 0;
 }
 
+static void *extend_heap(size_t words){
+    char *bp;
+    size_t size;
+
+    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+
+    if ((long)(bp = mem_sbrk(size)) == -1){
+        return NULL;
+    }
+
+    PUT(HDRP(bp), PACK(size, 0));          
+    PUT(FTRP(bp), PACK(size, 0));        
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));  
+
+    return coalesce(bp);
+}
 /*
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
