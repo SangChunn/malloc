@@ -273,12 +273,74 @@ void *mm_realloc(void *ptr, size_t size)
     if (ptr == NULL) return mm_malloc(size);
     if (size == 0) { mm_free(ptr); return NULL; }
 
-    void *newptr = mm_malloc(size);
-    if (newptr == NULL) return NULL;
-
     size_t oldsize = GET_SIZE(HDRP(ptr));
-    if (size < oldsize) oldsize = size;
-    memcpy(newptr, ptr, oldsize);
+    size_t asize;
+
+    if (size <= DSIZE)
+        asize = 2 * DSIZE;
+    else
+        asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
+    
+    if (asize <= oldsize){
+        size_t diff = oldsize - asize;
+        if (diff >= 2 * DSIZE){
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            void *next = NEXT_BLKP(ptr);
+            PUT(HDRP(next), PACK(diff, 0)); 
+            PUT(FTRP(next), PACK(diff, 0));
+            coalesce(next);
+        }
+        return ptr;
+    }
+
+    char *next = NEXT_BLKP(ptr);
+    size_t next_alloc = GET_ALLOC(HDRP(next));
+    size_t next_size = GET_SIZE(HDRP(next));
+
+    // 다음 블록이 free + 병합 후 충분한 경우
+    if (!next_alloc && (oldsize + next_size) >= asize) {
+        remove_free_block(next);
+        size_t total_size = oldsize + next_size;
+        PUT(HDRP(ptr), PACK(total_size, 1));
+        PUT(FTRP(ptr), PACK(total_size, 1));
+
+        size_t diff = total_size - asize;
+        if (diff >= 2 * DSIZE) {
+            // split 남은 영역
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            void *new_next = NEXT_BLKP(ptr);
+            PUT(HDRP(new_next), PACK(diff, 0));
+            PUT(FTRP(new_next), PACK(diff, 0));
+            coalesce(new_next);
+        }
+        return ptr;
+    }
+
+    // Case 5. 힙 끝이면 extend_heap으로 확장 시도
+    if (!next_alloc && next_size == 0) {
+        size_t extend_size = asize - oldsize;
+        if (extend_heap(extend_size / WSIZE) == NULL)
+            return NULL;
+
+        PUT(HDRP(ptr), PACK(oldsize + extend_size, 1));
+        PUT(FTRP(ptr), PACK(oldsize + extend_size, 1));
+        return ptr;
+    }
+
+    // Case 6. 새 블록 할당 (fallback)
+    void *newptr = mm_malloc(size);
+    if (newptr == NULL)
+        return NULL;
+
+    // 복사: 기존 payload 크기만큼
+    size_t copySize = oldsize - DSIZE;  // header/footer 제외
+    if (size < copySize)
+        copySize = size;
+    memcpy(newptr, ptr, copySize);
     mm_free(ptr);
     return newptr;
 }
