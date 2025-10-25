@@ -1,14 +1,3 @@
-/*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -20,27 +9,34 @@
 
 #define WSIZE 8
 #define DSIZE 16
-#define CHUNKSIZE (1<< 12)
+#define CHUNKSIZE (1<<11)
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
-
+#define ALIGN(size) (((size) + (DSIZE - 1)) & ~0xF)
 
 #define PACK(size, alloc) ((size) | (alloc))
 #define GET(p)       (*(size_t *)(p))
 #define PUT(p, val)  (*(size_t *)(p) = (val))
 
-#define GET_SIZE(p) (GET(p) & ~0xF) // F or 7
+#define GET_SIZE(p)  (GET(p) & ~0x7)
 #define GET_ALLOC(p) (GET(p) & 0x1)
 
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+
+#define PRED_PTR(bp) ((char **)(bp))
+#define SUCC_PTR(bp) ((char **)(bp + WSIZE))
+#define PRED(bp) (*(char **)(bp))
+#define SUCC(bp) (*(char **)(bp + WSIZE))
 
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+static void insert_free_block(void *bp);
+static void remove_free_block(void *bp);
 
 
 /*********************************************************
@@ -57,30 +53,101 @@ team_t team = {
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
-    ""};
+    ""
+};
+/* ----------------------------------------------------------
+   malloc size distribution setup (2의 거듭제곱 단위)
+   ---------------------------------------------------------- */
+static const size_t RANGES[] = {
+    8, 16, 32, 64, 128, 256, 512,
+    1024, 2048, 4096, 8192, 16384,
+    32768, 65536, 131072, 262144,
+    524288, 1048576, 2097152, 4194304
+};
+#define MAX_CLASS (sizeof(RANGES)/sizeof(RANGES[0]))
 
-/* single word (4) or double word (8) alignment */
-#define ALIGNMENT 16 // 8 or 16
+static unsigned long long count_table[MAX_CLASS];
+static unsigned long long total_calls = 0;
 
-/* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0xF) // F or 7
-
-#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
-
-/*
- * mm_init - initialize the malloc package.
- */
+/* ----------------------------------------------------------
+   전역 변수
+   ---------------------------------------------------------- */
 static char *heap_listp;
+static char *free_listp;
+static int stats_registered = 0;
 
+/* ----------------------------------------------------------
+   통계 출력 함수
+   ---------------------------------------------------------- */
+static void print_malloc_stats(void) {
+    printf("\n========== [ Malloc Size Distribution Summary ] ==========\n");
+    if (total_calls == 0) {
+        printf("No malloc calls recorded.\n");
+        return;
+    }
+
+    double cumulative = 0.0;
+    for (size_t i = 0; i < MAX_CLASS; i++) {
+        if (count_table[i] == 0) continue;
+        double percent = (100.0 * count_table[i]) / total_calls;
+        cumulative += percent;
+        printf("%8zuB ~ : %9llu calls  (%6.2f%%, cum %6.2f%%)\n",
+               RANGES[i], count_table[i], percent, cumulative);
+    }
+
+    printf("----------------------------------------------------------\n");
+    printf("Total malloc calls : %llu\n", total_calls);
+
+    // 평균, 중앙값, 표준편차 계산
+    double mean = 0.0;
+    for (size_t i = 0; i < MAX_CLASS; i++)
+        mean += RANGES[i] * count_table[i];
+    mean /= total_calls;
+
+    double var = 0.0;
+    for (size_t i = 0; i < MAX_CLASS; i++) {
+        double diff = RANGES[i] - mean;
+        var += diff * diff * count_table[i];
+    }
+    var /= total_calls;
+
+    // 중앙값
+    unsigned long long acc = 0;
+    double median = 0.0;
+    for (size_t i = 0; i < MAX_CLASS; i++) {
+        acc += count_table[i];
+        if (acc >= total_calls / 2) {
+            median = RANGES[i];
+            break;
+        }
+    }
+
+    printf("Average size        : %.2f bytes\n", mean);
+    printf("Median size         : %.2f bytes\n", median);
+
+    printf("==========================================================\n");
+}
+
+/* ----------------------------------------------------------
+   mm_init
+   ---------------------------------------------------------- */
 int mm_init(void)
 {
+    if (!stats_registered) {
+        memset(count_table, 0, sizeof(count_table));
+        total_calls = 0;
+        atexit(print_malloc_stats);
+        stats_registered = 1;
+    }
+
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1)
         return -1;
     PUT(heap_listp, 0);
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1));
+    PUT(heap_listp + WSIZE, PACK(DSIZE, 1));
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
     heap_listp += (2 * WSIZE);
+    free_listp = NULL;
 
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
@@ -88,81 +155,114 @@ int mm_init(void)
     return 0;
 }
 
-static void *extend_heap(size_t words){
+/* ----------------------------------------------------------
+   extend_heap, coalesce, find_fit, place
+   ---------------------------------------------------------- */
+static void *extend_heap(size_t words) {
     char *bp;
-    size_t size;
+    size_t size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
 
-    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
-
-    if ((long)(bp = mem_sbrk(size)) == -1){
+    if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
-    }
 
-    PUT(HDRP(bp), PACK(size, 0));          
-    PUT(FTRP(bp), PACK(size, 0));        
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));  
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
 
     return coalesce(bp);
 }
 
-static void *coalesce(void *bp){
+static void *coalesce(void *bp) {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
 
-    if (prev_alloc && next_alloc){
+    if (prev_alloc && next_alloc) {
+        insert_free_block(bp);
         return bp;
-    }
-    else if(prev_alloc && !next_alloc){
+    } else if (prev_alloc && !next_alloc) {
+        remove_free_block(NEXT_BLKP(bp));
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
-    }
-    else if(!prev_alloc && next_alloc){
+    } else if (!prev_alloc && next_alloc) {
+        remove_free_block(PREV_BLKP(bp));
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
-    }
-    else{
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+    } else {
+        remove_free_block(PREV_BLKP(bp));
+        remove_free_block(NEXT_BLKP(bp));
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
+    insert_free_block(bp);
     return bp;
 }
 
-/* first-fit 방식으로 free 블록 탐색 */
-static void *find_fit(size_t asize)
-{
-    void *bp;
+static void *find_fit(size_t asize) {
+    void *bp = free_listp;
+    void *best_bp = NULL;
+    size_t best_size = (size_t)-1;
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-            return bp; // 처음으로 맞는 free 블록 반환
+    while (bp != NULL){
+        size_t size = GET_SIZE(HDRP(bp));
+        if (!GET_ALLOC(HDRP(bp)) && size >= asize){
+            if (size == asize)
+                return bp;
+            if (size < best_size){
+                best_size = size;
+                best_bp = bp;
+            }
         }
+        bp = SUCC(bp);
     }
-    return NULL; // 찾지 못하면 NULL
+    return best_bp;
 }
 
-/*
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- */
+static void place(void *bp, size_t asize) {
+    size_t csize = GET_SIZE(HDRP(bp));
+    remove_free_block(bp);
+    if ((csize - asize) >= (2 * DSIZE)) {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+
+       void *next_bp = NEXT_BLKP(bp);
+        PUT(HDRP(next_bp), PACK(csize - asize, 0));
+        PUT(FTRP(next_bp), PACK(csize - asize, 0));
+        insert_free_block(next_bp);
+    } else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
+}
+
+/* ----------------------------------------------------------
+   mm_malloc / mm_free / mm_realloc
+   ---------------------------------------------------------- */
 void *mm_malloc(size_t size)
 {
+    // size 통계 집계 (2의 거듭제곱 구간)
+    for (size_t i = 0; i < MAX_CLASS; i++) {
+        if (size <= RANGES[i]) {
+            count_table[i]++;
+            break;
+        }
+    }
+    total_calls++;
+
     size_t asize;
     size_t extendsize;
     char *bp;
 
-    if (size == 0)
-        return NULL;
-
+    if (size == 0) return NULL;
     if (size <= DSIZE)
         asize = 2 * DSIZE;
     else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+        asize = ALIGN(size + DSIZE);
 
     if ((bp = find_fit(asize)) != NULL) {
         place(bp, asize);
@@ -176,49 +276,108 @@ void *mm_malloc(size_t size)
     return bp;
 }
 
-/*
- * mm_free - Freeing a block does nothing.
- */
-void mm_free(void *bp)
-{
+void mm_free(void *bp) {
     size_t size = GET_SIZE(HDRP(bp));
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
     coalesce(bp);
 }
-static void place(void *bp, size_t asize)
-{
-    size_t csize = GET_SIZE(HDRP(bp));
 
-    if ((csize - asize) >= (2 * DSIZE)) {
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize - asize, 0));
-        PUT(FTRP(bp), PACK(csize - asize, 0));
-    } else {
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
-    }
-}
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
 void *mm_realloc(void *ptr, size_t size)
 {
     if (ptr == NULL) return mm_malloc(size);
-    if (size == 0) {
-        mm_free(ptr);
-        return NULL;
-    }
-
-    void *newptr = mm_malloc(size);
-    if (newptr == NULL) return NULL;
+    if (size == 0) { mm_free(ptr); return NULL; }
 
     size_t oldsize = GET_SIZE(HDRP(ptr));
-    if (size < oldsize) oldsize = size;
-    memcpy(newptr, ptr, oldsize);
+    size_t asize;
+
+    if (size <= DSIZE)
+        asize = 2 * DSIZE;
+    else
+        asize = ALIGN(size + DSIZE);
+    
+    if (asize <= oldsize){
+        size_t diff = oldsize - asize;
+        if (diff >= 2 * DSIZE){
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            void *next = NEXT_BLKP(ptr);
+            PUT(HDRP(next), PACK(diff, 0)); 
+            PUT(FTRP(next), PACK(diff, 0));
+            coalesce(next);
+        }
+        return ptr;
+    }
+
+    char *next = NEXT_BLKP(ptr);
+    size_t next_alloc = GET_ALLOC(HDRP(next));
+    size_t next_size = GET_SIZE(HDRP(next));
+
+    // 다음 블록이 free + 병합 후 충분한 경우
+    if (!next_alloc && (oldsize + next_size) >= asize) {
+        remove_free_block(next);
+        size_t total_size = oldsize + next_size;
+        PUT(HDRP(ptr), PACK(total_size, 1));
+        PUT(FTRP(ptr), PACK(total_size, 1));
+
+        size_t diff = total_size - asize;
+        if (diff >= 2 * DSIZE) {
+            // split 남은 영역
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            void *new_next = NEXT_BLKP(ptr);
+            PUT(HDRP(new_next), PACK(diff, 0));
+            PUT(FTRP(new_next), PACK(diff, 0));
+            coalesce(new_next);
+        }
+        return ptr;
+    }
+
+    // Case 5. 힙 끝이면 extend_heap으로 확장 시도
+    if (!next_alloc && next_size == 0) {
+        size_t extend_size = asize - oldsize;
+        if (extend_heap(extend_size / WSIZE) == NULL)
+            return NULL;
+
+        PUT(HDRP(ptr), PACK(oldsize + extend_size, 1));
+        PUT(FTRP(ptr), PACK(oldsize + extend_size, 1));
+        return ptr;
+    }
+
+    // Case 6. 새 블록 할당 (fallback)
+    void *newptr = mm_malloc(size);
+    if (newptr == NULL)
+        return NULL;
+
+    // 복사: 기존 payload 크기만큼
+    size_t copySize = oldsize - DSIZE;  // header/footer 제외
+    if (size < copySize)
+        copySize = size;
+    memcpy(newptr, ptr, copySize);
     mm_free(ptr);
     return newptr;
 }
 
+/* ----------------------------------------------------------
+   Free list helpers
+   ---------------------------------------------------------- */
+static void insert_free_block(void *bp)
+{
+    SUCC(bp) = free_listp;
+    PRED(bp) = NULL;
+    if (free_listp != NULL)
+        PRED(free_listp) = bp;
+    free_listp = bp;
+}
+
+static void remove_free_block(void *bp)
+{
+    if (PRED(bp))
+        SUCC(PRED(bp)) = SUCC(bp);
+    else
+        free_listp = SUCC(bp);
+    if (SUCC(bp))
+        PRED(SUCC(bp)) = PRED(bp);
+}
