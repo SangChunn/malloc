@@ -36,12 +36,21 @@
 
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) 
+////////
+#define PRED_PTR(bp) ((char **)(bp))              // pred pointer 위치
+#define SUCC_PTR(bp) ((char **)(bp + WSIZE))      // succ pointer 위치
+
+#define PRED(bp) (*(char **)(bp))                 // pred 값 읽기
+#define SUCC(bp) (*(char **)(bp + WSIZE))         // succ 값 읽기
+
 
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 
+static void insert_free_block(void *bp);
+static void remove_free_block(void *bp);
 
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
@@ -71,6 +80,7 @@ team_t team = {
  * mm_init - initialize the malloc package.
  */
 static char *heap_listp;
+static char *free_listp;
 
 int mm_init(void)
 {
@@ -81,6 +91,8 @@ int mm_init(void)
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
     heap_listp += (2 * WSIZE);
+
+    free_listp = NULL;
 
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
@@ -105,45 +117,66 @@ static void *extend_heap(size_t words){
     return coalesce(bp);
 }
 
+static void *find_fit(size_t asize) {
+    void *bp;
+    for (bp = free_listp; bp != NULL; bp = SUCC(bp)) {
+        if (asize <= GET_SIZE(HDRP(bp))) {
+            return bp;
+        }
+    }
+    return NULL;
+}
+
 static void *coalesce(void *bp){
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc){
+        insert_free_block(bp);
         return bp;
     }
     else if(prev_alloc && !next_alloc){
+        remove_free_block(NEXT_BLKP(bp));
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
     }
     else if(!prev_alloc && next_alloc){
+        remove_free_block(PREV_BLKP(bp));
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
     else{
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        remove_free_block(PREV_BLKP(bp));
+        remove_free_block(NEXT_BLKP(bp));
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
+    insert_free_block(bp);
     return bp;
 }
 
-/* first-fit 방식으로 free 블록 탐색 */
-static void *find_fit(size_t asize)
+static void place(void *bp, size_t asize)
 {
-    void *bp;
+    size_t csize = GET_SIZE(HDRP(bp));
+    remove_free_block(bp);
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-            return bp; // 처음으로 맞는 free 블록 반환
-        }
+    if ((csize - asize) >= (2 * DSIZE)) {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize - asize, 0));
+        PUT(FTRP(bp), PACK(csize - asize, 0));
+        coalesce(bp);
+    } else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
     }
-    return NULL; // 찾지 못하면 NULL
 }
 
 /*
@@ -186,21 +219,7 @@ void mm_free(void *bp)
     PUT(FTRP(bp), PACK(size, 0));
     coalesce(bp);
 }
-static void place(void *bp, size_t asize)
-{
-    size_t csize = GET_SIZE(HDRP(bp));
 
-    if ((csize - asize) >= (2 * DSIZE)) {
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize - asize, 0));
-        PUT(FTRP(bp), PACK(csize - asize, 0));
-    } else {
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
-    }
-}
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
@@ -222,3 +241,23 @@ void *mm_realloc(void *ptr, size_t size)
     return newptr;
 }
 
+static void insert_free_block(void *bp)
+{
+    SUCC(bp) = free_listp;   
+    PRED(bp) = NULL;         
+
+    if (free_listp != NULL) 
+        PRED(free_listp) = bp;
+
+    free_listp = bp;         
+}
+
+static void remove_free_block(void *bp)
+{
+    if (PRED(bp))
+        SUCC(PRED(bp)) = SUCC(bp);
+    else
+        free_listp = SUCC(bp); 
+    if (SUCC(bp))
+        PRED(SUCC(bp)) = PRED(bp);
+}
